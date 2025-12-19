@@ -2,17 +2,17 @@ from markov_chain import MarkovChain
 import sys
 
 try:
-    print("Loading model...")
-    chain = MarkovChain("NUTUK_1.txt")
+    print("Loading model with Order 2...")
+    chain = MarkovChain("NUTUK_1.txt", max_order=2)
     print("Model loaded.")
     
-    print("Generating text...")
-    text = chain.generate_text("Millet", length=10)
+    print("Generating text with start 'Millet ve'...")
+    text = chain.generate_text("Millet ve", length=10)
     print(f"Generated: {text}")
     
-    print("Checking visualization data...")
-    transitions = chain.get_top_transitions("Millet", top_n=5)
-    print(f"Transitions for 'Millet': {transitions}")
+    print("Checking visualization data for 'Millet ve'...")
+    transitions = chain.get_top_transitions("Millet ve", top_n=5)
+    print(f"Transitions for 'Millet ve': {transitions}")
     
     if text and transitions:
         print("Verification SUCCESS")

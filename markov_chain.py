@@ -3,13 +3,16 @@ import re
 import os
 
 class MarkovChain:
-    def __init__(self, file_path="NUTUK_1.txt"):
+    def __init__(self, file_path="NUTUK_1.txt", max_order=3):
         self.file_path = file_path
+        self.max_order = max_order
         self.words = []
         self.vocab = []
         self.word_to_index = {}
         self.index_to_word = {}
-        self.transition_counts = {}
+        # models[n] stores transition counts for order n
+        # Key: tuple of n words, Value: dict of next_word: count
+        self.models = {}
         self.vocab_size = 0
         
         self._load_and_process_data()
@@ -19,7 +22,6 @@ class MarkovChain:
         if not os.path.exists(self.file_path):
             raise FileNotFoundError(f"File not found: {self.file_path}")
 
-        # Read the file and use content starting from line 283 (logic from original notebook)
         with open(self.file_path, "r", encoding="utf-8") as file:
             lines = file.readlines()
 
@@ -28,12 +30,13 @@ class MarkovChain:
         if len(lines) > start_line_index:
             nutuk = "".join(lines[start_line_index:])
         else:
-            # Fallback if file is short
             nutuk = "".join(lines)
 
-        # Cleaning
         nutuk_cleaned = nutuk.lower()
-        nutuk_cleaned = re.sub(r'[^\w\s]', '', nutuk_cleaned)
+        # Add space around punctuation to preserve them as tokens
+        nutuk_cleaned = re.sub(r'([.,!?;])', r' \1 ', nutuk_cleaned)
+        # Remove anything that is not a word character, whitespace, or punctuation
+        nutuk_cleaned = re.sub(r'[^\w\s.,!?;]', '', nutuk_cleaned)
         nutuk_cleaned = nutuk_cleaned.replace('\n', ' ')
         self.words = nutuk_cleaned.split()
 
@@ -43,32 +46,64 @@ class MarkovChain:
         self.word_to_index = {word: i for i, word in enumerate(self.vocab)}
         self.index_to_word = {i: word for i, word in enumerate(self.vocab)}
 
-        for i in range(len(self.words) - 1):
-            current_word = self.words[i]
-            next_word = self.words[i+1]
-            
-            if current_word not in self.transition_counts:
-                self.transition_counts[current_word] = {}
+        # Build models for orders 1 to max_order
+        for n in range(1, self.max_order + 1):
+            self.models[n] = {}
+            for i in range(len(self.words) - n):
+                state = tuple(self.words[i:i+n])
+                next_word = self.words[i+n]
                 
-            if next_word not in self.transition_counts[current_word]:
-                self.transition_counts[current_word][next_word] = 0
+                if state not in self.models[n]:
+                    self.models[n][state] = {}
                 
-            self.transition_counts[current_word][next_word] += 1
+                if next_word not in self.models[n][state]:
+                    self.models[n][state][next_word] = 0
+                    
+                self.models[n][state][next_word] += 1
 
-    def get_next_word(self, current_word, temperature=1.0, alpha=1.0):
-        # Initialize probabilities with smoothing (alpha)
-        probs = np.ones(self.vocab_size) * alpha
+    def _get_transition_probs(self, history, alpha=0.001):
+        # Backoff strategy: Try largest n that matches history suffix
+        found_state = None
+        found_transitions = None
         
-        # Add observed counts
-        if current_word in self.transition_counts:
-            for next_word, count in self.transition_counts[current_word].items():
+        # Try orders from max_order down to 1
+        # history needs at least n words to use order n
+        for n in range(min(len(history), self.max_order), 0, -1):
+            state = tuple(history[-n:])
+            if state in self.models[n]:
+                found_state = state
+                found_transitions = self.models[n][state]
+                break
+        
+        # Initialize probabilities efficiently
+        # Instead of np.ones * alpha which creates a full array, we only need non-zero values if alpha is small
+        # But we still need a base probability array to sample from. 
+        # Optimized approach:
+        
+        if found_transitions is None:
+             # Uniform distribution if absolutely no context found
+             probs = np.ones(self.vocab_size) / self.vocab_size
+             return probs, None
+
+        # Calculate probs with smoothing
+        # Initialize with alpha directly
+        probs = np.full(self.vocab_size, alpha)
+        
+        for next_word, count in found_transitions.items():
+            if next_word in self.word_to_index:
                 next_word_idx = self.word_to_index[next_word]
                 probs[next_word_idx] += count
-                
-        # Normalize
-        probs = probs / np.sum(probs)
         
-        # Apply Temperature
+        return probs / np.sum(probs), found_transitions
+
+    def get_next_word(self, history, temperature=1.0, alpha=0.001):
+        probs, _ = self._get_transition_probs(history, alpha)
+        
+        # Handle very low temperature (deterministic / argmax) to avoid numerical instability
+        if temperature < 0.05:
+            next_word_idx = np.argmax(probs)
+            return self.index_to_word[next_word_idx]
+
         if temperature != 1.0:
             probs = np.power(probs, 1.0 / temperature)
             probs = probs / np.sum(probs)
@@ -76,38 +111,25 @@ class MarkovChain:
         next_word_idx = np.random.choice(range(self.vocab_size), p=probs)
         return self.index_to_word[next_word_idx]
 
-    def generate_text(self, start_word, length=20, temperature=1.0, alpha=1.0):
-        current = start_word.lower()
-        if current not in self.word_to_index:
-            # If word not in vocab, pick a random one or handle gracefully
-            # For this app, simply picking a random start might be better, or just adding it to result and hoping next step works (it won't if not in counts).
-            # Let's fallback to random word if unknown
-            if self.vocab:
-                current = np.random.choice(self.vocab)
+    def generate_text(self, start_text, length=20, temperature=1.0, alpha=0.001):
+        # Process start text
+        current_history = start_text.lower().split()
         
-        result = [current]
+        result = list(current_history)
         
         for _ in range(length):
-            next_word = self.get_next_word(current, temperature, alpha)
+            next_word = self.get_next_word(current_history, temperature, alpha)
             result.append(next_word)
-            current = next_word
+            current_history.append(next_word)
             
         return " ".join(result)
 
-    def get_top_transitions(self, current_word, top_n=10, alpha=1.0):
-        current_word = current_word.lower()
+    def get_top_transitions(self, history, top_n=10, alpha=0.001):
+        if isinstance(history, str):
+            history = history.lower().split()
+            
+        probs, _ = self._get_transition_probs(history, alpha)
         
-        # Similar logic to get_next_word but returns distribution
-        probs = np.ones(self.vocab_size) * alpha
-        
-        if current_word in self.transition_counts:
-            for next_word, count in self.transition_counts[current_word].items():
-                next_word_idx = self.word_to_index[next_word]
-                probs[next_word_idx] += count
-        
-        probs = probs / np.sum(probs)
-        
-        # Get top N indices
         top_indices = np.argsort(probs)[-top_n:][::-1]
         
         transitions = {}
